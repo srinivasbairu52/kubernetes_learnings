@@ -19,6 +19,8 @@ def get_all_customers():
     connection.close()
 
     return customers
+
+
 def get_customer_by_id(customer_id):
     connection = get_connection()
 
@@ -35,3 +37,54 @@ def get_customer_by_id(customer_id):
     connection.close()
 
     return customer
+
+
+def add_customer(
+    account_number,
+    first_name,
+    last_name,
+    account_type,
+    balance,
+    phone,
+    email,
+    address,
+    branch
+):
+    connection = get_connection()
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO customer
+        (
+            account_number,
+            first_name,
+            last_name,
+            account_type,
+            balance,
+            phone,
+            email,
+            address,
+            branch
+        )
+        VALUES
+        (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (
+            account_number,
+            first_name,
+            last_name,
+            account_type,
+            balance,
+            phone,
+            email,
+            address,
+            branch
+        )
+    )
+
+    connection.commit()
+
+    cursor.close()
+    connection.close()
