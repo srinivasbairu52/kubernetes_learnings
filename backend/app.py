@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect
+from flask import Flask, render_template, request, redirect, jsonify
 from database import (
     get_all_customers,
     get_customer_by_id,
@@ -23,7 +23,7 @@ def customers():
 
 
 @app.route("/customer/<int:customer_id>")
-def customer_details(customer_id):
+def customer_details():
     customer = get_customer_by_id(customer_id)
 
     return render_template(
@@ -54,5 +54,21 @@ def add_customer_page():
     return render_template("add_customer.html")
 
 
+@app.route("/health")
+def health():
+    return jsonify(
+        {
+            "status": "UP",
+            "application": "Srinivas Bank",
+            "database": "Connected"
+        }
+    )
+
+
+@app.route("/api/customers")
+def api_customers():
+    return jsonify(get_all_customers())
+
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
