@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+
+  mysql:
+
+    image: mysql:8.4
+
+    container_name: mysql-bank
+
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: bankdb
+      MYSQL_USER: bankuser
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3306:3306"
+
+    volumes:
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/1-schema.sql
+      - ./database/sample-data.sql:/docker-entrypoint-initdb.d/2-data.sql
+      - mysql-data:/var/lib/mysql
+
+  bank-app:
+
+    build:
+      context: ./backend
+
+    container_name: bank-app
+
+    depends_on:
+      - mysql
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: bankuser
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_NAME: bankdb  
+    ports:
+      - "5000:5000"
+
+volumes:
+
+  mysql-data:
