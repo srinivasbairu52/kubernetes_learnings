@@ -23,7 +23,7 @@ def customers():
 
 
 @app.route("/customer/<int:customer_id>")
-def customer_details():
+def customer_details(customer_id):
     customer = get_customer_by_id(customer_id)
 
     return render_template(
