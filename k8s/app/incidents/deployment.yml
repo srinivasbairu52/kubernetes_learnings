@@ -16,5 +16,25 @@ spec:
         - name: bank-app
           image: bank-project-bank-app:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: DB_HOST
+              value: mysql
+            - name: DB_PORT
+              value: "3306"
+            - name: DB_NAME
+              value: bankdb
+            - name: DB_USER
+              value: bankuser
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_PASSWORD
           ports:
             - containerPort: 5000
+          readinessProbe:
+            httpGet:
+                path: /health
+                port: 5000
+            periodSeconds: 5
+            failureThreshold: 2

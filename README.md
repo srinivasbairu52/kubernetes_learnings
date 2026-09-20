@@ -1,806 +1,476 @@
-# Kubernetes Incident: Application Running but Service Unreachable
+# Kubernetes Production Incident: Application Ready but `/customers` Returned 500
 
-## 1. Incident Summary
+## Incident Summary
 
-A Flask application was successfully running inside a Kubernetes Pod, but the application was not reachable through its Kubernetes Service.
+The `bank-app` Kubernetes application Pods were running and passing readiness checks, but requests to the `/customers` endpoint returned HTTP 500.
 
-The Pod was healthy:
+The investigation required tracing the request from the Service through the Pod, application configuration, MySQL connectivity, and finally the database schema.
 
-```text
-Pod:        1/1 Running
-Application: Flask
-Application Port: 5000
-```
+The incident was resolved by:
 
-The Kubernetes Service, however, was initially configured with:
-
-```yaml
-port: 80
-targetPort: 8080
-```
-
-The application was actually listening on:
-
-```text
-5000
-```
-
-This caused a Service-to-Pod port mismatch.
+1. Configuring the application with the correct MySQL connection environment variables.
+2. Correcting MySQL Secret key references in the MySQL Deployment.
+3. Loading the required database schema and sample data.
+4. Verifying the application endpoint successfully returned customer data.
 
 ---
 
-# 2. Environment
+## Environment
 
-| Component            | Value      |
-| -------------------- | ---------- |
-| OS                   | Windows 11 |
-| Kubernetes           | Minikube   |
-| Kubernetes Version   | v1.35.1    |
-| Container Runtime    | Docker     |
-| Application          | Flask      |
-| Application Port     | 5000       |
-| Kubernetes Namespace | `dev`      |
-| Service Type         | NodePort   |
-| Service Port         | 80         |
-| NodePort             | 30080      |
+* Kubernetes: Minikube
+* Namespace: `dev`
+* Application: Flask
+* Database: MySQL 8.4
+* Application container port: `5000`
+* Kubernetes Service: `bank-app`
+* Database Service: `mysql`
 
 ---
 
-# 3. Architecture
+## Initial Symptom
 
-Initial architecture:
+Pods appeared healthy:
 
-```text
-                    Kubernetes
-                       |
-                +------+------+
-                |             |
-             Service         Pod
-           bank-app          bank-app
-              |                |
-        port: 80          Flask :5000
-        targetPort: 8080
-              |
-              X
-        Port mismatch
+```bash
+kubectl get pods -n dev
 ```
 
-Correct architecture:
+The application Pod was:
 
 ```text
-                    Kubernetes
-                       |
-                +------+------+
-                |             |
-             Service         Pod
-           bank-app          bank-app
-              |                |
-          port: 80        Flask :5000
-        targetPort: 5000
-              |
-              |
-          Application
+READY   STATUS
+1/1     Running
+```
+
+The Service and endpoints were also present.
+
+However:
+
+```bash
+curl http://bank-app/customers
+```
+
+returned:
+
+```text
+HTTP 500
+```
+
+The application logs showed:
+
+```text
+mysql.connector.errors.DatabaseError:
+2003 (HY000): Can't connect to MySQL server on 'localhost:3306'
 ```
 
 ---
 
-# 4. Application Verification
+## Investigation
 
-The application Pod was running:
+### 1. Verify Pod Status
 
 ```bash
 kubectl get pods -n dev -o wide
 ```
 
-Result:
+The application Pods were running.
 
-```text
-NAME                         READY   STATUS    IP
-bank-app-5656d66959-l24ml    1/1     Running   10.244.0.3
-```
+This ruled out:
 
-The Pod itself was healthy.
-
-Application logs showed:
-
-```text
-Running on all addresses (0.0.0.0)
-Running on http://127.0.0.1:5000
-Running on http://10.244.0.3:5000
-```
-
-This confirmed that Flask was listening on port `5000`.
+* Pod scheduling failure
+* ImagePullBackOff
+* CrashLoopBackOff
+* Container startup failure
 
 ---
 
-# 5. Initial Service Configuration
-
-The Service was initially configured as:
-
-```yaml
-apiVersion: v1
-kind: Service
-
-metadata:
-  name: bank-app
-
-spec:
-  type: NodePort
-
-  selector:
-    app: bank-app
-
-  ports:
-    - port: 80
-      targetPort: 8080
-      nodePort: 30080
-```
-
-The important configuration was:
-
-```text
-Service port: 80
-Target port: 8080
-```
-
-But the application was listening on:
-
-```text
-5000
-```
-
----
-
-# 6. Service Investigation
-
-Check the Service:
+### 2. Verify Service
 
 ```bash
-kubectl get svc bank-app -n dev
+kubectl get svc -n dev
 ```
 
-Result:
-
-```text
-NAME       TYPE       CLUSTER-IP       EXTERNAL-IP   PORT(S)
-bank-app   NodePort   10.109.150.103   <none>        80:30080/TCP
-```
-
-At this point, the Service itself existed and had a ClusterIP.
-
-However, that does not prove that traffic can reach the application.
+The `bank-app` Service existed and exposed port `80`.
 
 ---
 
-# 7. EndpointSlice Investigation
-
-The EndpointSlice initially showed:
-
-```text
-PORTS    ENDPOINTS
-8080     10.244.0.3
-```
-
-This was an important troubleshooting clue.
-
-It might initially look like Kubernetes had discovered an application listening on port `8080`.
-
-That is not what happened.
-
-## Important Kubernetes Lesson
-
-An EndpointSlice can show the Service's configured target port.
-
-It does **not** prove that a process inside the Pod is actually listening on that port.
-
-The Service configuration contained:
-
-```yaml
-targetPort: 8080
-```
-
-Therefore Kubernetes represented the endpoint as:
-
-```text
-10.244.0.3:8080
-```
-
-The actual Flask process was still listening on:
-
-```text
-10.244.0.3:5000
-```
-
-Therefore:
-
-```text
-Kubernetes Service → 8080
-                         ↓
-                    Nothing listening
-```
-
-while:
-
-```text
-Pod → Flask → 5000
-```
-
----
-
-# 8. Root Cause
-
-The root cause was a **Service targetPort mismatch**.
-
-### Application
-
-```text
-Flask → TCP 5000
-```
-
-### Service
-
-```text
-Service port → 80
-targetPort   → 8080
-```
-
-The Service was forwarding traffic to the wrong application port.
-
----
-
-# 9. Fix
-
-The Service was changed from:
-
-```yaml
-targetPort: 8080
-```
-
-to:
-
-```yaml
-targetPort: 5000
-```
-
-Final Service configuration:
-
-```yaml
-apiVersion: v1
-kind: Service
-
-metadata:
-  name: bank-app
-
-spec:
-  type: NodePort
-
-  selector:
-    app: bank-app
-
-  ports:
-    - port: 80
-      targetPort: 5000
-      nodePort: 30080
-```
-
-Apply the change:
+### 3. Verify Service Endpoints
 
 ```bash
-kubectl apply -f service-wrong-port.yml
+kubectl get endpoints bank-app -n dev
+```
+
+Endpoints were present:
+
+```text
+10.244.x.x:5000
+10.244.x.x:5000
+10.244.x.x:5000
+```
+
+This confirmed that the Service selector was finding the application Pods.
+
+---
+
+### 4. Verify Readiness
+
+The application Deployment contained an HTTP readiness probe:
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 5000
+  periodSeconds: 5
+  failureThreshold: 2
+```
+
+The `/health` endpoint returned HTTP 200:
+
+```text
+{
+  "application": "Srinivas Bank",
+  "database": "Connected",
+  "status": "UP"
+}
+```
+
+The Pod was therefore considered Ready and remained in the Service endpoints.
+
+A temporary readiness failure was also observed during Pod startup:
+
+```text
+Readiness probe failed:
+connect: connection refused
+```
+
+This was expected while the application was starting and did not cause the persistent HTTP 500.
+
+---
+
+## Root Cause 1: Missing Database Configuration
+
+The Flask application reads database configuration from environment variables:
+
+```python
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+    "user": os.getenv("DB_USER", "bankuser"),
+    "password": os.getenv("DB_PASSWORD", "bank123"),
+    "database": os.getenv("DB_NAME", "bankdb")
+}
+```
+
+The running application Pod initially had no `DB_*` environment variables.
+
+Therefore the application used the default:
+
+```text
+DB_HOST=localhost
+```
+
+Inside a Kubernetes Pod, `localhost` means the **same Pod**, not the MySQL Pod.
+
+MySQL was running in a separate Pod.
+
+### Verification
+
+```bash
+kubectl exec -n dev deploy/bank-app -- env | grep '^DB_'
+```
+
+Initially there was no output.
+
+The application consequently attempted:
+
+```text
+localhost:3306
+```
+
+instead of:
+
+```text
+mysql:3306
 ```
 
 ---
 
-# 10. Verify EndpointSlice After Fix
+## Fix 1: Configure Database Connection
 
-After changing the target port:
+The application Deployment was updated with:
+
+```yaml
+env:
+  - name: DB_HOST
+    value: mysql
+
+  - name: DB_PORT
+    value: "3306"
+
+  - name: DB_NAME
+    value: bankdb
+
+  - name: DB_USER
+    value: bankuser
+
+  - name: DB_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: mysql-secret
+        key: MYSQL_PASSWORD
+```
+
+The password is obtained from the Kubernetes Secret instead of being stored directly in the Deployment.
+
+After applying the Deployment:
 
 ```bash
-kubectl get endpointslice -n dev
+kubectl exec -n dev deploy/bank-app -- env | grep '^DB_'
 ```
 
-The Service endpoint changed from:
-
-```text
-8080
-```
-
-to:
-
-```text
-5000
-```
-
-Example:
-
-```text
-PORTS    ENDPOINTS
-5000     10.244.0.3
-```
-
-Now the Service configuration matched the actual application:
-
-```text
-Service
-   |
-   | targetPort 5000
-   ↓
-Pod 10.244.0.3:5000
-   |
-   ↓
-Flask
-```
+returned the expected configuration.
 
 ---
 
-# 11. Validate the Service From Inside the Cluster
+## Root Cause 2: Database Schema Was Missing
 
-The Service was tested using its DNS name:
+After fixing the connection configuration, the application could reach MySQL.
+
+The error changed to:
+
+```text
+mysql.connector.errors.ProgrammingError:
+1146 (42S02): Table 'bankdb.customer' doesn't exist
+```
+
+This was an important troubleshooting step.
+
+It proved that:
+
+* Kubernetes DNS was working.
+* The `mysql` Service was reachable.
+* MySQL was accepting connections.
+* Database credentials were valid.
+* The `bankdb` database existed.
+* The required `customer` table did not exist.
+
+---
+
+## Fix 2: Load Database Schema
+
+The existing schema was loaded into MySQL:
 
 ```bash
-kubectl run test-client \
-  -n dev \
-  --rm -it \
+kubectl exec -i -n dev <mysql-pod> -- \
+  mysql -ubankuser -p bankdb < database/schema.sql
+```
+
+Sample data was then loaded:
+
+```bash
+kubectl exec -i -n dev <mysql-pod> -- \
+  mysql -ubankuser -p bankdb < database/sample-data.sql
+```
+
+The actual database password was supplied interactively and was not committed to Git.
+
+---
+
+## Supporting Configuration Fix: MySQL Secret Keys
+
+The MySQL Deployment was also corrected to reference the actual keys present in the Kubernetes Secret.
+
+Updated references:
+
+```yaml
+- name: MYSQL_ROOT_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: mysql-secret
+      key: MYSQL_ROOT_PASSWORD
+```
+
+and:
+
+```yaml
+- name: MYSQL_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: mysql-secret
+      key: MYSQL_PASSWORD
+```
+
+The previous Deployment referenced different key names.
+
+---
+
+## Final Verification
+
+The application was tested from inside the Kubernetes cluster:
+
+```bash
+kubectl run curl-test -n dev --rm -it \
   --image=curlimages/curl \
-  -- curl http://bank-app:80
+  --restart=Never -- \
+  curl -s http://bank-app/customers
 ```
 
-The application returned the Flask HTML response.
+The request successfully returned the customer HTML page and customer records.
 
 This confirmed:
 
 ```text
-Pod
- ↓
-Service
- ↓
-Application
-```
-
-was working.
-
----
-
-# 12. Validate ClusterIP Directly
-
-The Service ClusterIP was:
-
-```text
-10.109.150.103
-```
-
-Tested from inside Minikube:
-
-```bash
-minikube ssh -- curl -v http://10.109.150.103:80
-```
-
-The response was:
-
-```text
-HTTP/1.1 200 OK
-```
-
-This confirmed that the ClusterIP Service was forwarding traffic correctly.
-
----
-
-# 13. Validate NodePort From Inside Minikube
-
-The Minikube node IP was:
-
-```text
-192.168.49.2
-```
-
-The NodePort was:
-
-```text
-30080
-```
-
-Test:
-
-```bash
-minikube ssh -- curl -v http://192.168.49.2:30080
-```
-
-The application returned:
-
-```text
-HTTP/1.1 200 OK
-```
-
-Therefore:
-
-```text
-NodePort
-   ↓
-Service
-   ↓
-Pod
-   ↓
-Flask
-```
-
-was working from inside the Minikube environment.
-
----
-
-# 14. Windows Host Test
-
-The same NodePort was tested directly from Windows:
-
-```bash
-curl -v http://192.168.49.2:30080
-```
-
-This timed out.
-
-At first this could appear to indicate another Kubernetes failure.
-
-However, the previous tests had already proven:
-
-```text
-Pod → healthy
-Service → healthy
-ClusterIP → working
-NodePort → working from Minikube
-```
-
-Therefore the remaining problem was outside the Kubernetes Service itself.
-
----
-
-# 15. Minikube Docker/WSL2 Networking
-
-The local environment was:
-
-```text
-Windows
-   |
-Docker Desktop
-   |
-WSL2
-   |
-Minikube Docker Driver
-   |
-Kubernetes Node
-```
-
-The Kubernetes node IP:
-
-```text
-192.168.49.2
-```
-
-was reachable from inside the Minikube environment but was not directly reachable from the Windows host in this setup.
-
-This was identified as a local Minikube/Docker/WSL2 networking limitation rather than another Kubernetes Service configuration problem.
-
----
-
-# 16. `minikube service --url`
-
-Minikube was also tested with:
-
-```bash
-minikube service bank-app -n dev --url
-```
-
-This produced a temporary URL similar to:
-
-```text
-http://127.0.0.1:58123
-```
-
-Important distinction:
-
-```text
-30080
-```
-
-is the Kubernetes NodePort.
-
-Whereas:
-
-```text
-58123
-```
-
-is a temporary Minikube forwarding port created for the `minikube service --url` command.
-
-The forwarding process must remain running for that temporary URL to work.
-
----
-
-# 17. Final Incident State
-
-After the Service fix:
-
-```text
-                    Windows
-                       |
-                  Minikube
-                       |
-                  NodePort
-                    :30080
-                       |
-                    Service
-                  port :80
-                       |
-               targetPort :5000
-                       |
-                     Pod
-                10.244.0.3
-                       |
-                 Flask :5000
-```
-
-Kubernetes components were functioning correctly.
-
-The original Kubernetes incident was resolved by correcting:
-
-```yaml
-targetPort: 8080
-```
-
-to:
-
-```yaml
-targetPort: 5000
+Client
+  ↓
+Kubernetes Service
+  ↓
+Ready bank-app Pod
+  ↓
+Flask Application
+  ↓
+mysql Service
+  ↓
+MySQL Pod
+  ↓
+bankdb
+  ↓
+customer table
+  ↓
+Successful response
 ```
 
 ---
 
-# 18. Root Cause vs Secondary Environment Issue
+## Troubleshooting Method Used
 
-## Primary Root Cause
-
-```text
-Service targetPort = 8080
-Application port   = 5000
-```
-
-This caused the Service to forward traffic to the wrong port.
-
-## Secondary Environment Issue
-
-Direct Windows access to the Minikube NodePort was affected by the local Docker/WSL2 networking environment.
-
-These were two separate issues and should not be mixed together.
-
----
-
-# 19. Troubleshooting Method Used
-
-The incident was investigated from the bottom upward.
+The incident was investigated from the outside inward:
 
 ```text
-1. Infrastructure
+1. Client request
        ↓
-2. Kubernetes Node
+2. Service
        ↓
-3. Pod
+3. Endpoints / EndpointSlice
        ↓
-4. Container
+4. Pod readiness
        ↓
-5. Application
+5. Application endpoint
        ↓
-6. Service
+6. Application logs / traceback
        ↓
-7. EndpointSlice
+7. Environment configuration
        ↓
-8. Port mapping
+8. Kubernetes DNS / Service
        ↓
-9. NodePort
+9. MySQL connectivity
        ↓
-10. External networking
+10. Database schema
 ```
 
-The most important rule:
-
-> Do not assume the first failing connection identifies the root cause.
-
-Instead, isolate each layer.
+This prevented assuming that a `Running` Pod automatically meant the application was working.
 
 ---
 
-# 20. Commands Used
+## Important Lessons
 
-### Pod
-
-```bash
-kubectl get pods -n dev -o wide
-```
-
-### Application logs
-
-```bash
-kubectl logs <pod-name> -n dev
-```
-
-### Service
-
-```bash
-kubectl get svc bank-app -n dev
-```
-
-### EndpointSlice
-
-```bash
-kubectl get endpointslice -n dev
-```
-
-### Apply Service change
-
-```bash
-kubectl apply -f service-wrong-port.yml
-```
-
-### Test Service DNS
-
-```bash
-kubectl run test-client \
-  -n dev \
-  --rm -it \
-  --image=curlimages/curl \
-  -- curl http://bank-app:80
-```
-
-### Test ClusterIP
-
-```bash
-minikube ssh -- curl -v http://10.109.150.103:80
-```
-
-### Test NodePort
-
-```bash
-minikube ssh -- curl -v http://192.168.49.2:30080
-```
-
-### Minikube Service URL
-
-```bash
-minikube service bank-app -n dev --url
-```
-
----
-
-# 21. Key DevOps Lessons
-
-## Lesson 1 — Running Pod does not mean reachable application
+### `Running` does not mean application is healthy
 
 A Pod can be:
 
 ```text
-1/1 Running
+Running
 ```
 
-while the application is still unreachable through a Service.
+while the application is returning HTTP 500.
 
-Always verify the application itself.
+Readiness determines whether Kubernetes should send Service traffic to the Pod.
 
 ---
 
-## Lesson 2 — Verify the actual listening port
+### `localhost` inside a Pod means the Pod itself
 
-Application logs showed:
+This is incorrect when MySQL runs in another Pod:
 
 ```text
-Flask :5000
+DB_HOST=localhost
 ```
 
-The Service was configured for:
+The Kubernetes Service name should be used:
 
 ```text
-targetPort: 8080
+DB_HOST=mysql
 ```
 
-The application port and Service targetPort must match.
+Kubernetes DNS resolves `mysql` to the MySQL Service.
 
 ---
 
-## Lesson 3 — EndpointSlice does not prove application health
+### Readiness and Liveness are different
 
-Seeing:
+Readiness:
 
 ```text
-10.244.0.3:8080
+Should this Pod receive traffic?
 ```
 
-does not mean port `8080` is listening inside the container.
-
-Endpoint information must be correlated with the actual application configuration.
-
----
-
-## Lesson 4 — Test from multiple network locations
-
-A useful troubleshooting pattern is:
+Liveness:
 
 ```text
-Pod
- ↓
-Service DNS
- ↓
-ClusterIP
- ↓
-NodePort
- ↓
-External client
+Should Kubernetes restart this container?
 ```
 
-The first point where connectivity fails helps identify the faulty layer.
+A failed readiness probe removes the Pod from Service traffic but does not restart the container.
 
 ---
 
-## Lesson 5 — Separate Kubernetes failures from environment failures
+### Service endpoints do not prove the application is working
 
-If:
+Endpoints only prove that Kubernetes selected Ready Pods and knows where to send traffic.
+
+The application can still return HTTP 500 after receiving the request.
+
+---
+
+### Error progression is valuable evidence
+
+The incident produced different errors as each layer was fixed:
 
 ```text
-ClusterIP works
-NodePort works from the node
-Windows host cannot reach NodePort
+localhost:3306 connection refused
+        ↓
+Database connection fixed
+        ↓
+customer table does not exist
+        ↓
+Schema loaded
+        ↓
+Successful customer response
 ```
 
-then the problem may be outside Kubernetes.
-
-Do not immediately change the Service configuration again.
+Each error narrowed the remaining problem.
 
 ---
 
-# 22. Production Incident Checklist
+## Production Considerations
 
-When an application is running but unreachable through a Service:
+For a production deployment, database initialization should not depend on manually executing SQL commands against a running Pod.
 
-```text
-[ ] Is the Pod Running?
-[ ] Is the Pod Ready?
-[ ] Does the container restart?
-[ ] What port is the application actually listening on?
-[ ] Does the Service selector match the Pod labels?
-[ ] Does the Service have endpoints?
-[ ] What targetPort is configured?
-[ ] Does targetPort match the application port?
-[ ] Does Service DNS resolve?
-[ ] Does ClusterIP work?
-[ ] Does NodePort work?
-[ ] Does LoadBalancer/Ingress work?
-[ ] Is NetworkPolicy blocking traffic?
-[ ] Is DNS working?
-[ ] Is the failure inside or outside the cluster?
-```
+A production implementation should use an appropriate database migration or initialization process.
+
+Secrets should also be managed through a proper secret-management solution rather than storing credentials directly in manifests.
+
+The current setup is a Kubernetes learning environment designed to reproduce and troubleshoot production-style failures.
 
 ---
 
-# 23. Interview Explanation
+## Incident Status
 
-### Question
+**Resolved**
 
-**A Kubernetes Pod is Running but the application is not accessible through the Service. How would you troubleshoot it?**
+Application connectivity, Kubernetes Service routing, readiness, MySQL connectivity, database schema, and application endpoint functionality were verified successfully.
 
-### Answer
+## Key Interview Explanation
 
-I would troubleshoot from the Pod outward.
-
-First, I would verify Pod readiness and application logs to determine which port the application is actually listening on.
-
-Then I would verify the Service selector and EndpointSlice.
-
-After that, I would compare the Service `targetPort` with the application's listening port.
-
-In this incident, the Flask application was listening on port `5000`, while the Service had `targetPort: 8080`.
-
-I changed the targetPort to `5000` and verified connectivity through the Service ClusterIP and NodePort.
-
-Finally, I tested from outside the Minikube environment to determine whether any remaining issue was related to the Kubernetes configuration or the local networking environment.
-
----
-
-# 24. Final Root Cause Statement
-
-**The application was healthy and running on port 5000, but the Kubernetes Service was configured with `targetPort: 8080`. The Service therefore forwarded traffic to the wrong port. Updating `targetPort` to 5000 restored Service-to-Pod connectivity. Subsequent testing showed that Kubernetes networking was functioning correctly; direct Windows-to-Minikube NodePort access was a separate local Docker/WSL2 networking limitation.**
+> The Pods were Running and Ready, and the Service had valid endpoints, but `/customers` returned HTTP 500. I traced the request into the application logs and found that the application was connecting to `localhost:3306` because the DB environment variables were missing. I configured the application to use the `mysql` Kubernetes Service and sourced the password from a Secret. The next error showed that the `customer` table was missing, so I loaded the database schema and sample data. Finally, I tested the endpoint from inside the cluster and confirmed that it returned the expected customer data.
 
